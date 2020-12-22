@@ -9,7 +9,13 @@ are useful when dealing with input, output, and bytestreams in a variety of
 ways.
 """
 import os
-from io import BytesIO
+from io import (
+    BytesIO,
+    RawIOBase,
+    DEFAULT_BUFFER_SIZE,
+    SEEK_SET, SEEK_CUR, SEEK_END,
+    UnsupportedOperation,
+)
 from abc import (
     ABCMeta,
     abstractmethod,
@@ -503,3 +509,115 @@ class MultiFileReader(object):
                 'MultiFileReader only supports seeking to start at this time')
         for f in self._fileobjs:
             f.seek(0)
+
+
+class SeekableStreamReader(RawIOBase):
+    def __init__(self, stream, buffer_size=0, chunk_size=DEFAULT_BUFFER_SIZE):
+        self.stream = stream
+        self.buffer_size = buffer_size
+        self.chunk_size = chunk_size
+        self.buffer = bytearray(buffer_size)
+        self.spos = 0
+        self.vpos = 0
+
+    def readable(self):
+        return True
+
+    def writeable(self):
+        return False
+
+    def seekable(self):
+        # we can only guarantee generic seekability with unlimited buffer
+        return not self.buffer_size
+
+    def getbuffer(self):
+        return memoryview(self.buffer)
+
+    def tell(self):
+        return self.vpos
+
+    def _read_until(self, offset):
+        self.vpos = self.spos
+        buf = bytearray(self.chunk_size)
+
+        if offset < 0:
+            while self.readinto(buf) != 0:
+                pass
+
+        else:
+            buf = memoryview(buf)
+            while True:
+                rest = offset - self.spos
+                if not rest or self.readinto(buf[:rest]) == 0:
+                    break
+
+    def seek(self, offset, whence=SEEK_SET):
+        # from end of file
+        if whence == SEEK_END:
+            # why would anyone even try that?
+            if offset >= 0:
+                raise UnsupportedOperation(
+                    f"can't do non-negative end-relative seeks")
+
+            # in a stream we only know the end, when we see it, thus the
+            # buffer needs to be big enough
+            if self.buffer_size and -offset > self.buffer_size:
+                raise UnsupportedOperation(
+                    f"buffer too small to seek to end-relative {offset}")
+
+            # read until we are at the end then jump back in buffer
+            self._read_until(offset)
+            self.vpos = self.spos + offset
+            return self.vpos
+
+        # turn relative into absolute
+        if whence == SEEK_CUR:
+            offset = self.vpos + offset
+
+        # safety check
+        if offset < 0:
+            raise ValueError(f"negative seek position {offset}")
+
+        # jump forward in stream
+        elif offset > self.spos:
+            self._read_until(offset)
+
+        # going backwards more than the buffer allows?
+        elif offset < self.spos - len(self.buffer):
+            raise UnsupportedOperation(
+                f"buffer too small to seek to {offset}")
+
+        else:
+            self.vpos = offset
+
+        return self.vpos
+
+    def readinto(self, b):
+        # read from buffer
+        if self.vpos < self.spos:
+            l = self.spos - self.vpos
+            b[:l] = self.buffer[-l:]
+            self.vpos = self.spos
+            return l
+
+        # actually read from stream
+        else:
+            l = self.stream.readinto(b)
+            if l:
+                # unlimited buffer: just extend
+                if not self.buffer_size:
+                    self.buffer.extend(b[:l])
+
+                # bigger than buffer: replace
+                elif l >= self.buffer_size:
+                    self.buffer[:] = b[l-self.buffer_size:l]
+
+                # smaller than buffer: copy end to front, then extend
+                else:
+                    keep = self.buffer_size - l
+                    self.buffer[:keep] = self.buffer[-keep:]
+                    self.buffer[keep:] = b[:l]
+
+                self.vpos = self.spos = self.spos + l
+
+            return l

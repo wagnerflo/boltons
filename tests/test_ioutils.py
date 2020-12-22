@@ -455,3 +455,86 @@ class TestMultiFileReader(TestCase):
         mfr = ioutils.MultiFileReader(f1, f2)
         utf8_double_file_str = mfr.read()
         assert utf8_double_file_str == (utf8_file_str * 2)
+
+
+class SeekableStreamReaderTestCase(TestCase):
+    def setUp(self):
+        self.bytes = bytes(range(97, 97 + 26))
+        self.stream = io.BytesIO(self.bytes)
+
+    def test_read_unlimited(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=0)
+        self.assertEqual(ssr.read(10),    self.bytes[  :10])
+        self.assertEqual(ssr.getbuffer(), self.bytes[  :10])
+        self.assertEqual(ssr.read(10),    self.bytes[10:20])
+        self.assertEqual(ssr.getbuffer(), self.bytes[  :20])
+        self.assertEqual(ssr.read(10),    self.bytes[20:26])
+        self.assertEqual(ssr.getbuffer(), self.bytes[  :26])
+
+    def test_read_limited(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=10)
+        self.assertEqual(ssr.read(4),          self.bytes[  : 4])
+        self.assertEqual(ssr.getbuffer()[-4:], self.bytes[  : 4])
+        self.assertEqual(ssr.read(4),          self.bytes[ 4: 8])
+        self.assertEqual(ssr.getbuffer()[-8:], self.bytes[  : 8])
+        self.assertEqual(ssr.read(4),          self.bytes[ 8:12])
+        self.assertEqual(ssr.getbuffer(),      self.bytes[ 2:12])
+        self.assertEqual(ssr.read(14),         self.bytes[12:26])
+        self.assertEqual(ssr.getbuffer(),      self.bytes[16:26])
+
+    def test_seek_set(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=8)
+        self.assertEqual(ssr.read(8), self.bytes[  : 8])
+        self.assertEqual(ssr.seek(4), 4)
+        self.assertEqual(ssr.tell(),  4)
+        self.assertEqual(ssr.read(8), self.bytes[ 4: 8])
+        self.assertEqual(ssr.read(4), self.bytes[ 8:12])
+
+    def test_seek_cur(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=8)
+        self.assertEqual(ssr.read(8), self.bytes[  : 8])
+        self.assertEqual(ssr.seek( 4, 1), 12)
+        self.assertEqual(ssr.tell(),      12)
+        self.assertEqual(ssr.read(4), self.bytes[12:16])
+        self.assertEqual(ssr.seek(-4, 1), 12)
+        self.assertEqual(ssr.tell(),      12)
+        self.assertEqual(ssr.read(8), self.bytes[12:16])
+        self.assertEqual(ssr.read(8), self.bytes[16:24])
+
+    def test_seek_end(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=8, chunk_size=4)
+        self.assertEqual(ssr.seek(-6, 2), 20)
+        self.assertEqual(ssr.tell(),      20)
+        self.assertEqual(ssr.seek( 2, 1), 22)
+        self.assertEqual(ssr.tell(),      22)
+        self.assertEqual(ssr.read(8), self.bytes[22:26])
+
+    def test_seek_too_much(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=8, chunk_size=4)
+        self.assertEqual(ssr.seek(52), 26)
+        self.assertEqual(ssr.seek(-8, 1), 18)
+        self.assertEqual(ssr.tell(),      18)
+        self.assertEqual(ssr.read(8), self.bytes[18:26])
+
+    def test_seek_errors(self):
+        ssr = ioutils.SeekableStreamReader(self.stream, buffer_size=8)
+        ssr.read(12)
+
+        errors = {
+            (ValueError, "negative seek position -2"): [
+                ( -2, 0), (-14, 1),
+            ],
+            (io.UnsupportedOperation, "buffer too small to seek to 2"): [
+                (  2, 0), (-10, 1),
+            ],
+            (io.UnsupportedOperation, "can't do non-negative end-relative seeks"): [
+                (  0, 2), (  2, 2),
+            ],
+            (io.UnsupportedOperation, "buffer too small to seek to end-relative -10"): [
+                (-10, 2),
+            ],
+        }
+
+        for (e,r),args in errors.items():
+            for arg in args:
+                self.assertRaisesRegex(e, r, ssr.seek, *arg)
